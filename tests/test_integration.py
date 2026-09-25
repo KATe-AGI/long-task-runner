@@ -1,6 +1,7 @@
-"""End-to-end checks for the detached tmux runner."""
+"""End-to-end checks for the detached runner."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -29,10 +30,11 @@ class RunnerIntegrationTest(unittest.TestCase):
 
     def test_success_and_failure_recorded(self):
         with tempfile.TemporaryDirectory() as temporary:
-            for name, command, expected_code in (
-                ("success", "printf 'hello\\n'", 0),
-                ("failure", "printf 'error\\n' >&2; exit 7", 7),
-            ):
+            if os.name == "nt":
+                cases = (("success", "Write-Output hello", 0), ("failure", "Write-Output error; exit 7", 7))
+            else:
+                cases = (("success", "printf 'hello\\n'", 0), ("failure", "printf 'error\\n' >&2; exit 7", 7))
+            for name, command, expected_code in cases:
                 with self.subTest(name=name):
                     result = self.run_cli(
                         "start", "--name", name, "--cwd", temporary,

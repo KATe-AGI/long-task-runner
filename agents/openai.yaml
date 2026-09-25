@@ -1,0 +1,5 @@
+interface:
+  display_name: "Long Task Runner"
+  short_description: "Run long commands offline and return later"
+policy:
+  allow_implicit_invocation: false

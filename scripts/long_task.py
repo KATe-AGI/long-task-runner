@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a finite shell command in a detached tmux session."""
+"""Run a finite shell command detached from the current Codex session."""
 
 from __future__ import annotations
 
@@ -15,6 +15,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
 
 
 def utc_now() -> str:
@@ -40,9 +44,26 @@ def tmux_alive(session: str) -> bool:
     ).returncode == 0
 
 
+def windows_alive(pid: int) -> bool:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def start(args: argparse.Namespace) -> int:
-    if os.name == "nt" or not shutil.which("tmux"):
-        raise RuntimeError("tmux is required; run this script inside Linux, macOS, or WSL")
+    if os.name != "nt" and not shutil.which("tmux"):
+        raise RuntimeError("tmux is required on Linux and macOS")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", args.name):
         raise ValueError("--name must use lowercase letters, digits, underscores, or hyphens")
     cwd = Path(args.cwd).expanduser().resolve(strict=True)
@@ -54,10 +75,10 @@ def start(args: argparse.Namespace) -> int:
     run_id = f"{args.name}-{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(3)}"
     run_dir = cwd / ".codex-runs" / run_id
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
-    session = f"codex_{run_id}"
+    backend = "windows" if os.name == "nt" else "tmux"
     metadata = {
         "run_id": run_id,
-        "session": session,
+        "backend": backend,
         "cwd": str(cwd),
         "estimate": args.estimate,
         "started_at": utc_now(),
@@ -69,19 +90,31 @@ def start(args: argparse.Namespace) -> int:
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         stream.write(args.cmd)
 
-    pane_command = " ".join(
-        shlex.quote(part)
-        for part in (sys.executable, str(Path(__file__).resolve()), "_run", "--run-dir", str(run_dir))
-    )
-    result = subprocess.run(
-        ["tmux", "new-session", "-d", "-s", session, pane_command],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode:
-        command_path.unlink(missing_ok=True)
-        raise RuntimeError(f"tmux failed to start: {result.stderr.strip()}")
+    runner = [sys.executable, str(Path(__file__).resolve()), "_run", "--run-dir", str(run_dir)]
+    if os.name == "nt":
+        process = subprocess.Popen(
+            runner,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        metadata["pid"] = process.pid
+        write_json(run_dir / "metadata.json", metadata)
+    else:
+        session = f"codex_{run_id}"
+        pane_command = " ".join(shlex.quote(part) for part in runner)
+        result = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session, pane_command],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode:
+            command_path.unlink(missing_ok=True)
+            raise RuntimeError(f"tmux failed to start: {result.stderr.strip()}")
+        metadata["session"] = session
+        write_json(run_dir / "metadata.json", metadata)
     print(json.dumps({**metadata, "run_dir": str(run_dir)}, indent=2))
     return 0
 
@@ -92,17 +125,25 @@ def run_inside(args: argparse.Namespace) -> int:
     command_path = run_dir / "command.tmp"
     command = command_path.read_text(encoding="utf-8")
     command_path.unlink()
-    write_json(run_dir / "state.json", {"status": "running", "started_at": utc_now()})
     try:
         with (run_dir / "output.log").open("ab", buffering=0) as output:
+            if os.name == "nt":
+                powershell = shutil.which("pwsh") or shutil.which("powershell.exe")
+                if not powershell:
+                    raise RuntimeError("PowerShell is required on Windows")
+                wrapped = (
+                    "$global:LASTEXITCODE = $null\n"
+                    + command
+                    + "\n$codex_success = $?\n"
+                    + "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n"
+                    + "if ($codex_success) { exit 0 } else { exit 1 }\n"
+                )
+                invocation = [powershell, "-NoProfile", "-NonInteractive", "-Command", wrapped]
+            else:
+                invocation = ["/bin/sh", "-c", command]
             result = subprocess.run(
-                command,
-                shell=True,
-                executable="/bin/sh",
-                cwd=metadata["cwd"],
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                check=False,
+                invocation, cwd=metadata["cwd"], stdout=output,
+                stderr=subprocess.STDOUT, check=False,
             )
         exit_code = result.returncode
     except Exception as error:
@@ -110,31 +151,20 @@ def run_inside(args: argparse.Namespace) -> int:
             output.write(f"\nRunner error: {error}\n")
         exit_code = 125
     (run_dir / "exit_code").write_text(f"{exit_code}\n", encoding="utf-8")
-    write_json(
-        run_dir / "state.json",
-        {"status": "succeeded" if exit_code == 0 else "failed", "exit_code": exit_code, "ended_at": utc_now()},
-    )
     return 0
 
 
 def status(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir).expanduser().resolve(strict=True)
     metadata = read_json(run_dir / "metadata.json")
-    state_path = run_dir / "state.json"
-    if state_path.exists():
-        state = read_json(state_path)
+    exit_path = run_dir / "exit_code"
+    if exit_path.exists():
+        code = int(exit_path.read_text(encoding="utf-8").strip())
+        state = {"status": "succeeded" if code == 0 else "failed", "exit_code": code}
+    elif (windows_alive(metadata["pid"]) if metadata["backend"] == "windows" else tmux_alive(metadata["session"])):
+        state = {"status": "running"}
     else:
-        state = {"status": "starting"}
-    if state["status"] in {"starting", "running"}:
-        if not shutil.which("tmux"):
-            state = {"status": "unknown", "reason": "tmux is unavailable"}
-        elif not tmux_alive(metadata["session"]):
-            exit_path = run_dir / "exit_code"
-            if exit_path.exists():
-                code = int(exit_path.read_text(encoding="utf-8").strip())
-                state = {"status": "succeeded" if code == 0 else "failed", "exit_code": code}
-            else:
-                state = {"status": "interrupted", "reason": "tmux session ended without an exit code"}
+        state = {"status": "unknown", "reason": "runner ended without an exit code"}
     print(json.dumps({**metadata, "run_dir": str(run_dir), **state}, indent=2))
     return 0
 
@@ -152,7 +182,7 @@ def log(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
-    start_parser = subparsers.add_parser("start", help="launch a detached tmux job")
+    start_parser = subparsers.add_parser("start", help="launch a detached job")
     start_parser.add_argument("--name", required=True)
     start_parser.add_argument("--estimate", default="unknown")
     start_parser.add_argument("--cwd", required=True)
