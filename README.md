@@ -23,4 +23,10 @@ python3 scripts/long_task.py log --run-dir /path/to/project/.codex-runs/<run-id>
 
 The helper starts a tmux session, writes `metadata.json`, `state.json`, `output.log`, and `exit_code` in the run directory, and prints the paths needed to inspect the run. Jobs do not notify or wake Codex automatically. Return to the original Codex conversation and ask it to continue after the job finishes.
 
+Run the integration check on a Linux, macOS, or WSL machine with tmux available:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
 Shell commands are executed by `/bin/sh`. Keep secrets out of command arguments because they may appear in process listings. The run directory should be kept private if command output or logs are sensitive.
