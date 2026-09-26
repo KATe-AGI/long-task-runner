@@ -14,6 +14,18 @@ On Ubuntu/Debian, install dependencies with `sudo apt-get install python3 git tm
 
 ## Install globally
 
+### Recommended: ask Codex to install and enable automatic invocation
+
+Paste this message into Codex on the machine where you want the skill installed. It also works when an older copy is already installed:
+
+```text
+请在这台机器上全局安装或更新 https://github.com/KATe-AGI/long-task-runner，并启用 Codex 自动调用。先确定当前 Codex 实际使用的 CODEX_HOME；若未设置，使用当前用户的 ~/.codex（Windows 为 %USERPROFILE%\.codex）。把仓库放在该目录的 skills/long-task-runner 下；若已安装，先核对仓库来源并保留现有本地改动，再安全更新。按 README 安装当前系统缺少的运行依赖。将该技能 agents/openai.yaml 中的 policy.allow_implicit_invocation 设为 true，保留其他配置。最后核验 SKILL.md、运行脚本、依赖和该配置都位于实际技能目录，报告安装路径及检查结果，并提醒我开启新的 Codex 会话。不要只克隆仓库就宣称已启用自动调用。
+```
+
+The repository defaults to explicit invocation (`allow_implicit_invocation: false`), so copying or cloning it alone will **not** enable automatic selection. Setting the policy to `true` allows Codex to select the skill; actual selection still depends on the command and the skill description.
+
+### Manual installation (explicit invocation by default)
+
 Clone the repository into Codex's user skill directory. If `CODEX_HOME` is set, use its `skills` directory instead of the default path.
 
 Linux/macOS:
